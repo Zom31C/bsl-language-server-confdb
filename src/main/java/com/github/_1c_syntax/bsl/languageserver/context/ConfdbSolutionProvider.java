@@ -8,6 +8,8 @@ import com.github._1c_syntax.bsl.mdo.Catalog;
 import com.github._1c_syntax.bsl.mdo.ChartOfAccounts;
 import com.github._1c_syntax.bsl.mdo.ChartOfCalculationTypes;
 import com.github._1c_syntax.bsl.mdo.ChartOfCharacteristicTypes;
+import com.github._1c_syntax.bsl.mdo.CommonCommand;
+import com.github._1c_syntax.bsl.mdo.CommonForm;
 import com.github._1c_syntax.bsl.mdo.CommonModule;
 import com.github._1c_syntax.bsl.mdo.Constant;
 import com.github._1c_syntax.bsl.mdo.DataProcessor;
@@ -20,9 +22,17 @@ import com.github._1c_syntax.bsl.mdo.InformationRegister;
 import com.github._1c_syntax.bsl.mdo.MD;
 import com.github._1c_syntax.bsl.mdo.Module;
 import com.github._1c_syntax.bsl.mdo.Report;
+import com.github._1c_syntax.bsl.mdo.Role;
+import com.github._1c_syntax.bsl.mdo.Subsystem;
 import com.github._1c_syntax.bsl.mdo.Task;
 import com.github._1c_syntax.bsl.mdo.WebService;
+import com.github._1c_syntax.bsl.mdo.children.EnumValue;
+import com.github._1c_syntax.bsl.mdo.children.ObjectAttribute;
+import com.github._1c_syntax.bsl.mdo.children.ObjectCommand;
+import com.github._1c_syntax.bsl.mdo.children.ObjectForm;
 import com.github._1c_syntax.bsl.mdo.children.ObjectModule;
+import com.github._1c_syntax.bsl.mdo.children.ObjectTabularSection;
+import com.github._1c_syntax.bsl.mdo.support.FormType;
 import com.github._1c_syntax.bsl.mdo.support.ObjectBelonging;
 import com.github._1c_syntax.bsl.mdo.support.ReturnValueReuse;
 import com.github._1c_syntax.bsl.mdclasses.Configuration;
@@ -33,6 +43,8 @@ import com.github._1c_syntax.bsl.types.MDOType;
 import com.github._1c_syntax.bsl.types.MdoReference;
 import com.github._1c_syntax.bsl.types.ModuleType;
 import com.github._1c_syntax.bsl.types.ScriptVariant;
+import com.github._1c_syntax.bsl.types.ValueTypeDescription;
+import com.github._1c_syntax.bsl.types.value.PrimitiveValueType;
 import lombok.extern.slf4j.Slf4j;
 import org.jspecify.annotations.Nullable;
 
@@ -65,7 +77,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public final class ConfdbSolutionProvider {
 
-  /** confdb meta_object.type → MDOType для объектов, поддерживаемых мостом. */
+  /** confdb meta_object.type → MDOType для объектов верхнего уровня. */
   private static final Map<String, MDOType> MDO_TYPES = Map.ofEntries(
     Map.entry("Catalog", MDOType.CATALOG),
     Map.entry("Document", MDOType.DOCUMENT),
@@ -86,7 +98,11 @@ public final class ConfdbSolutionProvider {
     Map.entry("ChartOfCalculationTypes", MDOType.CHART_OF_CALCULATION_TYPES),
     Map.entry("ChartOfCharacteristicType", MDOType.CHART_OF_CHARACTERISTIC_TYPES),
     Map.entry("HTTPService", MDOType.HTTP_SERVICE),
-    Map.entry("WebService", MDOType.WEB_SERVICE)
+    Map.entry("WebService", MDOType.WEB_SERVICE),
+    Map.entry("Role", MDOType.ROLE),
+    Map.entry("Subsystem", MDOType.SUBSYSTEM),
+    Map.entry("CommonCommand", MDOType.COMMON_COMMAND),
+    Map.entry("CommonForm", MDOType.COMMON_FORM)
   );
 
   /** Типы регистров, у которых модуль obj — это модуль набора записей. */
@@ -98,7 +114,7 @@ public final class ConfdbSolutionProvider {
   }
 
   /**
-   * Читет базу confdb и собирает {@link Solution}.
+   * Читает базу confdb и собирает {@link Solution}.
    *
    * @param database      путь к базе SQLite confdb
    * @param workspaceRoot корень workspace с файлами дампа (для URI модулей)
@@ -116,9 +132,21 @@ public final class ConfdbSolutionProvider {
 
   private static Solution readSolution(Connection connection, Path workspaceRoot) throws SQLException {
     var root = readRootConfiguration(connection);
-
-    var modulesByObject = readModulesByObject(connection);
     var rows = readMetaObjects(connection);
+    var modulesByObject = readModulesByObject(connection);
+    var attributesByObject = readAttributes(connection);
+    var tabularsByObject = readTabulars(connection);
+    var enumValuesByObject = readEnumValues(connection);
+    var contentBySubsystem = readSubsystemContent(connection);
+
+    var rowsByParent = new HashMap<Integer, List<MetaRow>>();
+    var rowsById = new HashMap<Integer, MetaRow>();
+    for (var row : rows) {
+      if (row.parentId() != null) {
+        rowsByParent.computeIfAbsent(row.parentId(), key -> new ArrayList<>()).add(row);
+      }
+      rowsById.put(row.id(), row);
+    }
 
     var configurationBuilder = Configuration.builder()
       .configurationSource(ConfigurationSource.DESIGNER)
@@ -134,41 +162,122 @@ public final class ConfdbSolutionProvider {
     var topLevel = new ArrayList<MD>();
     var objectsBuilt = 0;
     var modulesBound = 0;
-    for (var row : rows) {
-      if (row.parentId() == null || row.parentId() != root.id()) {
-        continue;
-      }
+    var formsBuilt = 0;
+    var attributesBuilt = 0;
+    for (var row : rowsByParent.getOrDefault(root.id(), List.of())) {
       var mdoType = MDO_TYPES.get(row.type());
       if (mdoType == null) {
         continue;
       }
       var reference = MdoReference.create(mdoType, row.name());
-      var moduleRows = modulesByObject.getOrDefault(row.id(), List.of());
+      if ("Role".equals(row.type())) {
+        var role = Role.builder()
+          .uuid(row.uuid()).name(row.name()).mdoReference(reference)
+          .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
+          .build();
+        configurationBuilder.role(role);
+        topLevel.add(role);
+        objectsBuilt++;
+        continue;
+      }
+      if ("Subsystem".equals(row.type())) {
+        var subsystem = buildSubsystem(row, rowsByParent, contentBySubsystem, rowsById, "Subsystem");
+        configurationBuilder.subsystem(subsystem);
+        topLevel.add(subsystem);
+        objectsBuilt++;
+        continue;
+      }
       if ("CommonModule".equals(row.type())) {
+        var moduleRows = modulesByObject.getOrDefault(row.id(), List.of());
         if (moduleRows.isEmpty()) {
           continue;
         }
         var commonModule = buildCommonModule(row, reference, moduleRows.get(0), workspaceRoot);
         configurationBuilder.commonModule(commonModule);
         topLevel.add(commonModule);
-      } else {
-        var modules = buildObjectModules(row.type(), reference, moduleRows, workspaceRoot);
-        if (modules.isEmpty()) {
-          continue;
-        }
-        var md = addTopLevelObject(configurationBuilder, row, reference, modules);
-        if (md == null) {
-          continue;
-        }
-        topLevel.add(md);
-        modulesBound += modules.size();
+        modulesBound++;
+        objectsBuilt++;
+        continue;
       }
+      if ("CommonCommand".equals(row.type()) || "CommonForm".equals(row.type())) {
+        var isForm = "CommonForm".equals(row.type());
+        var boundModules = buildBoundModules(reference,
+          isForm ? ModuleType.FormModule : ModuleType.CommandModule,
+          modulesByObject.getOrDefault(row.id(), List.of()), workspaceRoot);
+        if ("CommonCommand".equals(row.type())) {
+          var command = CommonCommand.builder()
+            .uuid(row.uuid()).name(row.name()).mdoReference(reference)
+            .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
+            .modules(boundModules).build();
+          configurationBuilder.commonCommand(command);
+          topLevel.add(command);
+        } else {
+          var form = CommonForm.builder()
+            .uuid(row.uuid()).name(row.name()).mdoReference(reference)
+            .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
+            .formType(FormType.MANAGED).modules(boundModules).build();
+          configurationBuilder.commonForm(form);
+          topLevel.add(form);
+          formsBuilt++;
+        }
+        modulesBound += boundModules.size();
+        objectsBuilt++;
+        continue;
+      }
+      var modules = buildObjectModules(row.type(), reference,
+        modulesByObject.getOrDefault(row.id(), List.of()), workspaceRoot);
+      var forms = buildForms(rowsByParent.getOrDefault(row.id(), List.of()),
+        row, reference, modulesByObject, workspaceRoot);
+      formsBuilt += forms.size();
+      var commands = buildCommands(rowsByParent.getOrDefault(row.id(), List.of()),
+        row, reference, mdoType, modulesByObject, workspaceRoot);
+      var attributes = buildAttributes(attributesByObject.getOrDefault(row.id(), List.of()),
+        row, reference, mdoType, null);
+      var tabulars = buildTabularSections(tabularsByObject.getOrDefault(row.id(), List.of()),
+        attributesByObject.getOrDefault(row.id(), List.of()), row, reference, mdoType);
+      attributesBuilt += attributes.size()
+        + tabulars.stream().mapToInt(ts -> ts.getAttributes().size()).sum();
+      var enumValues = buildEnumValues(enumValuesByObject.getOrDefault(row.id(), List.of()),
+        row.name(), reference);
+      var md = addTopLevelObject(configurationBuilder, row, reference,
+        modules, forms, commands, attributes, tabulars, enumValues, attributesByObject);
+      if (md == null) {
+        continue;
+      }
+      topLevel.add(md);
+      modulesBound += modules.size() + forms.size()
+        + commands.stream().mapToInt(command -> command.getModules().size()).sum();
       objectsBuilt++;
     }
 
-    var configuration = configurationBuilder.children(topLevel).build();
-    LOGGER.info("confdb: loaded configuration '{}' — {} objects, {} modules bound",
-      root.name(), objectsBuilt, modulesBound);
+    // модули самой конфигурации (сеанса, управляемого приложения)
+    var configurationReference = MdoReference.create(MDOType.CONFIGURATION, root.name());
+    var configurationModules = new ArrayList<Module>();
+    for (var moduleRow : modulesByObject.getOrDefault(root.id(), List.of())) {
+      var moduleType = switch (moduleRow.codeName()) {
+        case "seance" -> ModuleType.SessionModule;
+        case "app" -> ModuleType.ApplicationModule;
+        default -> null; // 802/con — модули обычного приложения и менеджера значений
+      };
+      if (moduleType == null) {
+        continue;
+      }
+      configurationModules.add(ObjectModule.builder()
+        .moduleType(moduleType)
+        .uri(moduleUri(workspaceRoot, moduleRow.path()))
+        .owner(configurationReference)
+        .supportVariant(SupportVariant.NOT_SUPPORTED)
+        .isProtected(false)
+        .build());
+    }
+    modulesBound += configurationModules.size();
+
+    var configuration = configurationBuilder
+      .modules(configurationModules)
+      .children(topLevel)
+      .build();
+    LOGGER.info("confdb: loaded configuration '{}' — {} objects, {} modules, {} forms, {} attributes",
+      root.name(), objectsBuilt, modulesBound, formsBuilt, attributesBuilt);
     return Solution.builder()
       .baseConfiguration(configuration)
       .mergedConfiguration(configuration)
@@ -176,6 +285,8 @@ public final class ConfdbSolutionProvider {
       .provenance(Map.of())
       .build();
   }
+
+  // -- чтение таблиц ----------------------------------------------------------
 
   private static MetaRow readRootConfiguration(Connection connection) throws SQLException {
     try (var statement = connection.prepareStatement(
@@ -221,6 +332,65 @@ public final class ConfdbSolutionProvider {
     }
     return result;
   }
+
+  private static Map<Integer, List<AttributeRow>> readAttributes(Connection connection) throws SQLException {
+    var result = new HashMap<Integer, List<AttributeRow>>();
+    try (var statement = connection.prepareStatement(
+      "SELECT object_id, name, type_str, tabular FROM meta_attribute ORDER BY ord")) {
+      try (var resultSet = statement.executeQuery()) {
+        while (resultSet.next()) {
+          var row = new AttributeRow(resultSet.getString(2),
+            resultSet.getString(3), resultSet.getString(4));
+          result.computeIfAbsent(resultSet.getInt(1), key -> new ArrayList<>()).add(row);
+        }
+      }
+    }
+    return result;
+  }
+
+  private static Map<Integer, List<TabularRow>> readTabulars(Connection connection) throws SQLException {
+    var result = new HashMap<Integer, List<TabularRow>>();
+    try (var statement = connection.prepareStatement(
+      "SELECT object_id, ord, name FROM meta_tabular ORDER BY ord")) {
+      try (var resultSet = statement.executeQuery()) {
+        while (resultSet.next()) {
+          result.computeIfAbsent(resultSet.getInt(1), key -> new ArrayList<>())
+            .add(new TabularRow(resultSet.getInt(2), resultSet.getString(3)));
+        }
+      }
+    }
+    return result;
+  }
+
+  private static Map<Integer, List<EnumValueRow>> readEnumValues(Connection connection) throws SQLException {
+    var result = new HashMap<Integer, List<EnumValueRow>>();
+    try (var statement = connection.prepareStatement(
+      "SELECT object_id, ord, name FROM enum_value ORDER BY ord")) {
+      try (var resultSet = statement.executeQuery()) {
+        while (resultSet.next()) {
+          result.computeIfAbsent(resultSet.getInt(1), key -> new ArrayList<>())
+            .add(new EnumValueRow(resultSet.getInt(2), resultSet.getString(3)));
+        }
+      }
+    }
+    return result;
+  }
+
+  private static Map<Integer, List<Integer>> readSubsystemContent(Connection connection) throws SQLException {
+    var result = new HashMap<Integer, List<Integer>>();
+    try (var statement = connection.prepareStatement(
+      "SELECT subsystem_id, target_id FROM subsystem_content")) {
+      try (var resultSet = statement.executeQuery()) {
+        while (resultSet.next()) {
+          result.computeIfAbsent(resultSet.getInt(1), key -> new ArrayList<>())
+            .add(resultSet.getInt(2));
+        }
+      }
+    }
+    return result;
+  }
+
+  // -- сборка детей -----------------------------------------------------------
 
   private static List<Module> buildObjectModules(String type, MdoReference owner,
                                                  List<ModuleRow> moduleRows, Path workspaceRoot) {
@@ -273,126 +443,361 @@ public final class ConfdbSolutionProvider {
       .build();
   }
 
+  private static List<ObjectForm> buildForms(List<MetaRow> children, MetaRow ownerRow,
+                                             MdoReference ownerReference,
+                                             Map<Integer, List<ModuleRow>> modulesByObject,
+                                             Path workspaceRoot) {
+    var forms = new ArrayList<ObjectForm>();
+    var ownerType = MDO_TYPES.get(ownerRow.type());
+    if (ownerType == null) {
+      return forms;
+    }
+    for (var row : children) {
+      if (!"Form".equals(row.type()) && !row.type().endsWith("Form")) {
+        continue;
+      }
+      var formReference = MdoReference.create(ownerType,
+        ownerRow.name() + ".Form." + row.name());
+      var formModules = new ArrayList<Module>();
+      for (var moduleRow : modulesByObject.getOrDefault(row.id(), List.of())) {
+        formModules.add(ObjectModule.builder()
+          .moduleType(ModuleType.FormModule)
+          .uri(moduleUri(workspaceRoot, moduleRow.path()))
+          .owner(formReference)
+          .supportVariant(SupportVariant.NOT_SUPPORTED)
+          .isProtected(false)
+          .build());
+      }
+      forms.add(ObjectForm.builder()
+        .uuid(row.uuid())
+        .name(row.name())
+        .mdoReference(formReference)
+        .objectBelonging(ObjectBelonging.OWN)
+        .supportVariant(SupportVariant.NOT_SUPPORTED)
+        .formType(FormType.MANAGED)
+        .owner(ownerReference)
+        .modules(formModules)
+        .build());
+    }
+    return forms;
+  }
+
+  private static List<Module> buildBoundModules(MdoReference owner, ModuleType moduleType,
+                                                List<ModuleRow> moduleRows, Path workspaceRoot) {
+    var modules = new ArrayList<Module>();
+    for (var moduleRow : moduleRows) {
+      modules.add(ObjectModule.builder()
+        .moduleType(moduleType)
+        .uri(moduleUri(workspaceRoot, moduleRow.path()))
+        .owner(owner)
+        .supportVariant(SupportVariant.NOT_SUPPORTED)
+        .isProtected(false)
+        .build());
+    }
+    return modules;
+  }
+
+  private static List<ObjectCommand> buildCommands(List<MetaRow> children, MetaRow ownerRow,
+                                                   MdoReference ownerReference, MDOType ownerType,
+                                                   Map<Integer, List<ModuleRow>> modulesByObject,
+                                                   Path workspaceRoot) {
+    var commands = new ArrayList<ObjectCommand>();
+    for (var row : children) {
+      if (!row.type().endsWith("Command")) {
+        continue;
+      }
+      var commandReference = MdoReference.create(ownerType,
+        ownerRow.name() + ".Command." + row.name());
+      commands.add(ObjectCommand.builder()
+        .uuid(row.uuid())
+        .name(row.name())
+        .mdoReference(commandReference)
+        .owner(ownerReference)
+        .objectBelonging(ObjectBelonging.OWN)
+        .supportVariant(SupportVariant.NOT_SUPPORTED)
+        .modules(buildBoundModules(commandReference, ModuleType.CommandModule,
+          modulesByObject.getOrDefault(row.id(), List.of()), workspaceRoot))
+        .build());
+    }
+    return commands;
+  }
+
+  private static List<ObjectAttribute> buildAttributes(List<AttributeRow> attributeRows,
+                                                       MetaRow ownerRow, MdoReference ownerReference,
+                                                       MDOType ownerType,
+                                                       @Nullable String tabularSection) {
+    var attributes = new ArrayList<ObjectAttribute>();
+    for (var row : attributeRows) {
+      var inTabular = row.tabular() != null;
+      if (tabularSection == null && inTabular) {
+        continue; // реквизит табличной части строится вместе с ней
+      }
+      if (tabularSection != null && !tabularSection.equals(row.tabular())) {
+        continue;
+      }
+      var segment = tabularSection == null
+        ? ownerRow.name() + ".Attribute." + row.name()
+        : ownerRow.name() + ".TabularSection." + tabularSection + ".Attribute." + row.name();
+      attributes.add(ObjectAttribute.builder()
+        .name(row.name())
+        .mdoReference(MdoReference.create(ownerType, segment))
+        .owner(ownerReference)
+        .objectBelonging(ObjectBelonging.OWN)
+        .supportVariant(SupportVariant.NOT_SUPPORTED)
+        .type(parseTypeDescription(row.typeStr()))
+        .build());
+    }
+    return attributes;
+  }
+
+  private static List<ObjectTabularSection> buildTabularSections(List<TabularRow> tabularRows,
+                                                                 List<AttributeRow> attributeRows,
+                                                                 MetaRow ownerRow,
+                                                                 MdoReference ownerReference,
+                                                                 MDOType ownerType) {
+    var sections = new ArrayList<ObjectTabularSection>();
+    for (var tabular : tabularRows) {
+      var reference = MdoReference.create(ownerType,
+        ownerRow.name() + ".TabularSection." + tabular.name());
+      sections.add(ObjectTabularSection.builder()
+        .name(tabular.name())
+        .mdoReference(reference)
+        .owner(ownerReference)
+        .objectBelonging(ObjectBelonging.OWN)
+        .supportVariant(SupportVariant.NOT_SUPPORTED)
+        .attributes(buildAttributes(attributeRows, ownerRow, ownerReference, ownerType, tabular.name()))
+        .build());
+    }
+    return sections;
+  }
+
+  private static List<EnumValue> buildEnumValues(List<EnumValueRow> valueRows, String ownerName,
+                                                 MdoReference ownerReference) {
+    var values = new ArrayList<EnumValue>();
+    for (var row : valueRows) {
+      values.add(EnumValue.builder()
+        .name(row.name())
+        .mdoReference(MdoReference.create(MDOType.ENUM,
+          ownerName + ".EnumValue." + row.name()))
+        .owner(ownerReference)
+        .objectBelonging(ObjectBelonging.OWN)
+        .supportVariant(SupportVariant.NOT_SUPPORTED)
+        .build());
+    }
+    return values;
+  }
+
+  private static Subsystem buildSubsystem(MetaRow row, Map<Integer, List<MetaRow>> rowsByParent,
+                                          Map<Integer, List<Integer>> contentBySubsystem,
+                                          Map<Integer, MetaRow> rowsById, String referencePrefix) {
+    var reference = MdoReference.create(MDOType.SUBSYSTEM, referencePrefix + "." + row.name());
+    var builder = Subsystem.builder()
+      .uuid(row.uuid())
+      .name(row.name())
+      .mdoReference(reference)
+      .objectBelonging(ObjectBelonging.OWN)
+      .supportVariant(SupportVariant.NOT_SUPPORTED);
+    var content = new ArrayList<MdoReference>();
+    for (var targetId : contentBySubsystem.getOrDefault(row.id(), List.of())) {
+      var target = rowsById.get(targetId);
+      if (target == null) {
+        continue;
+      }
+      var targetType = MDO_TYPES.get(target.type());
+      if (targetType == null) {
+        continue;
+      }
+      content.add(MdoReference.create(targetType, target.name()));
+    }
+    builder.content(content);
+    var childPrefix = referencePrefix + "." + row.name() + ".Subsystem";
+    for (var child : rowsByParent.getOrDefault(row.id(), List.of())) {
+      if ("Subsystem".equals(child.type())) {
+        builder.subsystem(buildSubsystem(child, rowsByParent, contentBySubsystem, rowsById, childPrefix));
+      }
+    }
+    return builder.build();
+  }
+
+  /** Разбирает confdb type_str в {@link ValueTypeDescription}. */
+  private static ValueTypeDescription parseTypeDescription(@Nullable String typeStr) {
+    if (typeStr == null || typeStr.isEmpty()) {
+      return ValueTypeDescription.EMPTY;
+    }
+    var primitives = new ArrayList<com.github._1c_syntax.bsl.types.ValueType>();
+    var refs = new ArrayList<MdoReference>();
+    for (var rawPart : typeStr.split("\\|")) {
+      var part = rawPart.trim();
+      if (part.startsWith("ОпределяемыйТип:")) {
+        var open = part.indexOf('(');
+        var close = part.lastIndexOf(')');
+        if (open < 0 || close <= open) {
+          continue; // определяемый тип без раскрытия состава
+        }
+        part = part.substring(open + 1, close).trim();
+      }
+      if (part.startsWith("Строка")) {
+        primitives.add(PrimitiveValueType.STRING);
+      } else if (part.startsWith("Число")) {
+        primitives.add(PrimitiveValueType.NUMBER);
+      } else if (part.startsWith("Дата")) {
+        primitives.add(PrimitiveValueType.DATE);
+      } else if (part.startsWith("Булево")) {
+        primitives.add(PrimitiveValueType.BOOLEAN);
+      } else if (part.startsWith("Ссылка: ")) {
+        var path = part.substring("Ссылка: ".length()).trim();
+        var slash = path.indexOf('/');
+        if (slash > 0) {
+          var mdoType = MDO_TYPES.get(path.substring(0, slash));
+          if (mdoType != null) {
+            refs.add(MdoReference.create(mdoType, path.substring(slash + 1)));
+          }
+        }
+      }
+      // остальные типы (ХранилищеЗначения, УникальныйИдентификатор, ...) пока пропускаются
+    }
+    if (!refs.isEmpty()) {
+      return ValueTypeDescription.createRef(refs);
+    }
+    if (!primitives.isEmpty()) {
+      return ValueTypeDescription.create(primitives);
+    }
+    return ValueTypeDescription.EMPTY;
+  }
+
+  // -- сборка объектов верхнего уровня ----------------------------------------
+
   @Nullable
   private static MD addTopLevelObject(Configuration.ConfigurationBuilder builder, MetaRow row,
-                                      MdoReference reference, List<Module> modules) {
+                                      MdoReference reference, List<Module> modules,
+                                      List<ObjectForm> forms, List<ObjectCommand> commands,
+                                      List<ObjectAttribute> attributes,
+                                      List<ObjectTabularSection> tabulars, List<EnumValue> enumValues,
+                                      Map<Integer, List<AttributeRow>> attributesByObject) {
     return switch (row.type()) {
       case "Catalog" -> {
         var md = Catalog.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).commands(commands)
+          .attributes(attributes).tabularSections(tabulars).build();
         builder.catalog(md);
         yield md;
       }
       case "Document" -> {
         var md = Document.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).commands(commands)
+          .attributes(attributes).tabularSections(tabulars).build();
         builder.document(md);
         yield md;
       }
       case "Constant" -> {
+        var constantType = attributesByObject.getOrDefault(row.id(), List.of()).stream()
+          .filter(attribute -> attribute.tabular() == null)
+          .findFirst()
+          .map(attribute -> parseTypeDescription(attribute.typeStr()))
+          .orElse(ValueTypeDescription.EMPTY);
         var md = Constant.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).type(constantType).build();
         builder.constant(md);
         yield md;
       }
       case "Enum" -> {
         var md = Enum.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).enumValues(enumValues).build();
         builder.Enum(md);
         yield md;
       }
       case "Report" -> {
         var md = Report.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).tabularSections(tabulars).build();
         builder.report(md);
         yield md;
       }
       case "DataProcessor" -> {
         var md = DataProcessor.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).tabularSections(tabulars).build();
         builder.dataProcessor(md);
         yield md;
       }
       case "InformationRegister" -> {
         var md = InformationRegister.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).commands(commands).attributes(attributes).build();
         builder.informationRegister(md);
         yield md;
       }
       case "AccumulationRegister" -> {
         var md = AccumulationRegister.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).commands(commands).attributes(attributes).build();
         builder.accumulationRegister(md);
         yield md;
       }
       case "AccountingRegister" -> {
         var md = AccountingRegister.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).build();
         builder.accountingRegister(md);
         yield md;
       }
       case "CalculationRegister" -> {
         var md = CalculationRegister.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).build();
         builder.calculationRegister(md);
         yield md;
       }
       case "DocumentJournal" -> {
         var md = DocumentJournal.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).build();
         builder.documentJournal(md);
         yield md;
       }
       case "ExchangePlan" -> {
         var md = ExchangePlan.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).commands(commands).attributes(attributes).build();
         builder.exchangePlan(md);
         yield md;
       }
       case "BusinessProcess" -> {
         var md = BusinessProcess.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).tabularSections(tabulars).build();
         builder.businessProcess(md);
         yield md;
       }
       case "Task" -> {
         var md = Task.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).tabularSections(tabulars).build();
         builder.task(md);
         yield md;
       }
       case "ChartOfAccounts" -> {
         var md = ChartOfAccounts.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).tabularSections(tabulars).build();
         builder.chartOfAccounts(md);
         yield md;
       }
       case "ChartOfCalculationTypes" -> {
         var md = ChartOfCalculationTypes.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).build();
         builder.chartOfCalculationTypes(md);
         yield md;
       }
       case "ChartOfCharacteristicType" -> {
         var md = ChartOfCharacteristicTypes.builder().uuid(row.uuid()).name(row.name()).mdoReference(reference)
           .objectBelonging(ObjectBelonging.OWN).supportVariant(SupportVariant.NOT_SUPPORTED)
-          .modules(modules).build();
+          .modules(modules).forms(forms).attributes(attributes).build();
         builder.chartOfCharacteristicTypes(md);
         yield md;
       }
@@ -425,5 +830,17 @@ public final class ConfdbSolutionProvider {
 
   /** Строка модуля объекта: относительный путь файла в дампе, code_name, контекст. */
   private record ModuleRow(String path, String codeName, String context) {
+  }
+
+  /** Строка meta_attribute. */
+  private record AttributeRow(String name, String typeStr, @Nullable String tabular) {
+  }
+
+  /** Строка meta_tabular. */
+  private record TabularRow(int ord, String name) {
+  }
+
+  /** Строка enum_value. */
+  private record EnumValueRow(int ord, String name) {
   }
 }
