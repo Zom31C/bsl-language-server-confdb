@@ -139,6 +139,9 @@ dependencies {
     // JGit
     implementation("org.eclipse.jgit:org.eclipse.jgit:7.7.1.202607240634-r")
 
+    // confdb metadata source (SQLite bridge)
+    implementation("org.xerial:sqlite-jdbc:3.53.2.1")
+
     // progress bar
     implementation("me.tongfei:progressbar:0.10.2")
 

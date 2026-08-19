@@ -50,6 +50,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.File;
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -534,9 +535,16 @@ public class ServerContext {
     progress.beginProgress(getMessage("computeConfigurationMetadata"));
 
     Solution configuration;
+    var confdbDatabase = resolveConfdbDatabase();
     try {
-      configuration = computeConfigurationExecutor.submit(
-        () -> MDClasses.createSolution(configurationRoot, SOLUTION_READ_SETTINGS)).get();
+      if (confdbDatabase != null) {
+        var root = configurationRoot;
+        configuration = computeConfigurationExecutor.submit(
+          () -> ConfdbSolutionProvider.createSolution(confdbDatabase, root)).get();
+      } else {
+        configuration = computeConfigurationExecutor.submit(
+          () -> MDClasses.createSolution(configurationRoot, SOLUTION_READ_SETTINGS)).get();
+      }
     } catch (ExecutionException e) {
       LOGGER.error("Can't parse configuration metadata. Execution exception: {}", e.getMessage(), e);
       configuration = Solution.EMPTY;
@@ -549,6 +557,26 @@ public class ServerContext {
     progress.endProgress(getMessage("computeConfigurationMetadataDone"));
 
     return configuration;
+  }
+
+  /**
+   * Путь к базе confdb из конфигурации workspace; {@code null}, если источник не задан
+   * или файл базы не найден (тогда метаданные читаются штатно из EDT/файлов конфигуратора).
+   */
+  @Nullable
+  private Path resolveConfdbDatabase() {
+    var confdbDatabase = languageServerConfiguration.getConfdbDatabase();
+    if (confdbDatabase == null) {
+      return null;
+    }
+    var resolved = confdbDatabase.isAbsolute()
+      ? confdbDatabase
+      : configurationRoot.resolve(confdbDatabase);
+    if (!Files.isRegularFile(resolved)) {
+      LOGGER.error("confdb database not found: {}", resolved);
+      return null;
+    }
+    return resolved;
   }
 
   /**

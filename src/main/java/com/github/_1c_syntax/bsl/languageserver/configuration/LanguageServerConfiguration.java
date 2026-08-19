@@ -134,6 +134,16 @@ public class LanguageServerConfiguration {
    */
   private List<String> excludePaths = new ArrayList<>();
 
+  /**
+   * Путь к базе SQLite, собранной confdb (экстрактор конфигурации 1С,
+   * проект 1c-conf-db-extractor). Если задан — метаданные конфигурации читаются
+   * из этой базы вместо EDT/файлов конфигуратора; файлы модулей при этом берутся
+   * из workspace (дамп confdb, подготовленный prep-lsp).
+   * Относительные пути разрешаются относительно корня конфигурации.
+   */
+  @Nullable
+  private Path confdbDatabase;
+
   @JsonIgnore
   @Setter(value = AccessLevel.NONE)
   @Nullable
