@@ -25,6 +25,9 @@ import com.github._1c_syntax.bsl.languageserver.mcp.dto.SymbolDto;
 import com.github._1c_syntax.bsl.languageserver.mcp.McpDocumentReader;
 import com.github._1c_syntax.bsl.languageserver.providers.DocumentSymbolProvider;
 import lombok.RequiredArgsConstructor;
+import org.eclipse.lsp4j.DocumentSymbol;
+import org.eclipse.lsp4j.SymbolKind;
+import org.jspecify.annotations.Nullable;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.context.annotation.Profile;
@@ -50,14 +53,17 @@ public class DocumentSymbolsTool {
    * Результат разбора символов файла.
    *
    * @param file Путь к файлу.
-   * @param symbols Дерево символов.
+   * @param symbols Дерево символов (пусто в режиме outline).
+   * @param outline Компактное текстовое оглавление (null вне режима outline).
    */
-  public record Result(String file, List<SymbolDto> symbols) {
+  public record Result(String file, List<SymbolDto> symbols, @Nullable String outline) {
   }
 
   @McpTool(
     name = "document_symbols",
-    description = "Return the symbol tree (regions, methods, variables) of a 1C/OneScript file.",
+    description = "Return the symbol tree (regions, methods, variables) of a 1C/OneScript file. "
+      + "For large modules pass outline=true to get a compact text outline (regions and method "
+      + "signatures with line ranges) instead of the full JSON tree.",
     // Output schema disabled: Spring AI generates a non-nullable schema that rejects null DTO
     // fields (here — nullable symbol detail). Known upstream bug, open as of 2.0.0-M6:
     // https://github.com/spring-projects/spring-ai/issues/4825
@@ -72,13 +78,39 @@ public class DocumentSymbolsTool {
       openWorldHint = false))
   public Result documentSymbols(
     @McpToolParam(required = true, description = McpToolParams.FILE)
-    String file
+    String file,
+    @McpToolParam(required = false, description = "Return a compact text outline "
+      + "(regions + method signatures with line ranges) instead of the full JSON tree. "
+      + "Recommended for large files.")
+    Boolean outline
   ) {
     return documentReader.read(file, documentContext -> {
-      var symbols = documentSymbolProvider.getDocumentSymbols(documentContext).stream()
-        .map(SymbolDto::from)
-        .toList();
-      return new Result(file, symbols);
+      var raw = documentSymbolProvider.getDocumentSymbols(documentContext);
+      if (Boolean.TRUE.equals(outline)) {
+        var builder = new StringBuilder();
+        raw.forEach(symbol -> appendOutline(symbol, 0, builder));
+        return new Result(file, List.of(), builder.toString());
+      }
+      var symbols = raw.stream().map(SymbolDto::from).toList();
+      return new Result(file, symbols, null);
     });
+  }
+
+  /** Компактная строка оглавления: вглубь только по регионам/классам, без локальных переменных. */
+  private static void appendOutline(DocumentSymbol symbol, int depth, StringBuilder builder) {
+    builder.append("  ".repeat(depth))
+      .append(symbol.getKind().name()).append(' ').append(symbol.getName());
+    if (symbol.getDetail() != null && !symbol.getDetail().isBlank()) {
+      builder.append(' ').append(symbol.getDetail());
+    }
+    var range = symbol.getSelectionRange() != null ? symbol.getSelectionRange() : symbol.getRange();
+    builder.append("  [строки ").append(range.getStart().getLine())
+      .append('-').append(range.getEnd().getLine()).append("]\n");
+    var kind = symbol.getKind();
+    var isContainer = kind == SymbolKind.Namespace || kind == SymbolKind.Class
+      || kind == SymbolKind.Package || kind == SymbolKind.Module;
+    if (isContainer && symbol.getChildren() != null) {
+      symbol.getChildren().forEach(child -> appendOutline(child, depth + 1, builder));
+    }
   }
 }

@@ -83,14 +83,19 @@ public class FindReferencesTool {
     int character
   ) {
     return documentReader.read(file, documentContext -> {
-      var params = new ReferenceParams();
-      params.setPosition(new Position(line, character));
-      params.setContext(new ReferenceContext(true));
+      try {
+        var params = new ReferenceParams();
+        params.setPosition(new Position(line, character));
+        params.setContext(new ReferenceContext(true));
 
-      var references = referencesProvider.getReferences(documentContext, params).stream()
-        .map(LocationDto::from)
-        .toList();
-      return new Result(file, references.size(), references);
+        var references = referencesProvider.getReferences(documentContext, params).stream()
+          .map(LocationDto::from)
+          .toList();
+        return new Result(file, references.size(), references);
+      } catch (RuntimeException e) {
+        // позиция на неразрешимом символе (встроенный метод и т.п.) — пустой результат
+        return new Result(file, 0, List.of());
+      }
     });
   }
 }

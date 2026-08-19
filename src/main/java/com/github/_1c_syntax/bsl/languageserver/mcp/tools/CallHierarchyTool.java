@@ -94,26 +94,31 @@ public class CallHierarchyTool {
     int character
   ) {
     return documentReader.read(file, documentContext -> {
-      var prepareParams = new CallHierarchyPrepareParams();
-      prepareParams.setTextDocument(new TextDocumentIdentifier(documentContext.getUri().toString()));
-      prepareParams.setPosition(new Position(line, character));
+      try {
+        var prepareParams = new CallHierarchyPrepareParams();
+        prepareParams.setTextDocument(new TextDocumentIdentifier(documentContext.getUri().toString()));
+        prepareParams.setPosition(new Position(line, character));
 
-      var items = callHierarchyProvider.prepareCallHierarchy(documentContext, prepareParams);
-      if (items.isEmpty()) {
+        var items = callHierarchyProvider.prepareCallHierarchy(documentContext, prepareParams);
+        if (items.isEmpty()) {
+          return new Result(null, List.of(), List.of());
+        }
+
+        var item = items.get(0);
+
+        var incoming = callHierarchyProvider
+          .incomingCalls(documentContext, new CallHierarchyIncomingCallsParams(item))
+          .stream().map(CallDto::incoming).toList();
+
+        var outgoing = callHierarchyProvider
+          .outgoingCalls(documentContext, new CallHierarchyOutgoingCallsParams(item))
+          .stream().map(CallDto::outgoing).toList();
+
+        return new Result(CallHierarchyItemDto.from(item), incoming, outgoing);
+      } catch (RuntimeException e) {
+        // позиция на неразрешимом символе (встроенный метод и т.п.) — пустой результат
         return new Result(null, List.of(), List.of());
       }
-
-      var item = items.get(0);
-
-      var incoming = callHierarchyProvider
-        .incomingCalls(documentContext, new CallHierarchyIncomingCallsParams(item))
-        .stream().map(CallDto::incoming).toList();
-
-      var outgoing = callHierarchyProvider
-        .outgoingCalls(documentContext, new CallHierarchyOutgoingCallsParams(item))
-        .stream().map(CallDto::outgoing).toList();
-
-      return new Result(CallHierarchyItemDto.from(item), incoming, outgoing);
     });
   }
 }

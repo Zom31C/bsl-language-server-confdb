@@ -56,7 +56,9 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -164,9 +166,16 @@ public final class ConfdbSolutionProvider {
     var modulesBound = 0;
     var formsBuilt = 0;
     var attributesBuilt = 0;
+    // mdclasses сравнивает MdoReference без учёта регистра: дубликаты имён,
+    // различающихся только регистром (опечатки конфигурации), роняют построение
+    // индексов (Duplicate key) — повторяющиеся имена пропускаются
+    var seenTopLevel = new HashSet<String>();
     for (var row : rowsByParent.getOrDefault(root.id(), List.of())) {
       var mdoType = MDO_TYPES.get(row.type());
       if (mdoType == null) {
+        continue;
+      }
+      if (!seenTopLevel.add(row.type() + '#' + row.name().toLowerCase(Locale.ROOT))) {
         continue;
       }
       var reference = MdoReference.create(mdoType, row.name());
@@ -452,8 +461,12 @@ public final class ConfdbSolutionProvider {
     if (ownerType == null) {
       return forms;
     }
+    var seen = new HashSet<String>();
     for (var row : children) {
       if (!"Form".equals(row.type()) && !row.type().endsWith("Form")) {
+        continue;
+      }
+      if (!seen.add(row.name().toLowerCase(Locale.ROOT))) {
         continue;
       }
       var formReference = MdoReference.create(ownerType,
@@ -502,8 +515,12 @@ public final class ConfdbSolutionProvider {
                                                    Map<Integer, List<ModuleRow>> modulesByObject,
                                                    Path workspaceRoot) {
     var commands = new ArrayList<ObjectCommand>();
+    var seen = new HashSet<String>();
     for (var row : children) {
       if (!row.type().endsWith("Command")) {
+        continue;
+      }
+      if (!seen.add(row.name().toLowerCase(Locale.ROOT))) {
         continue;
       }
       var commandReference = MdoReference.create(ownerType,
@@ -527,12 +544,16 @@ public final class ConfdbSolutionProvider {
                                                        MDOType ownerType,
                                                        @Nullable String tabularSection) {
     var attributes = new ArrayList<ObjectAttribute>();
+    var seen = new HashSet<String>();
     for (var row : attributeRows) {
       var inTabular = row.tabular() != null;
       if (tabularSection == null && inTabular) {
         continue; // реквизит табличной части строится вместе с ней
       }
       if (tabularSection != null && !tabularSection.equals(row.tabular())) {
+        continue;
+      }
+      if (!seen.add(row.name().toLowerCase(Locale.ROOT))) {
         continue;
       }
       var segment = tabularSection == null
@@ -556,7 +577,11 @@ public final class ConfdbSolutionProvider {
                                                                  MdoReference ownerReference,
                                                                  MDOType ownerType) {
     var sections = new ArrayList<ObjectTabularSection>();
+    var seen = new HashSet<String>();
     for (var tabular : tabularRows) {
+      if (!seen.add(tabular.name().toLowerCase(Locale.ROOT))) {
+        continue;
+      }
       var reference = MdoReference.create(ownerType,
         ownerRow.name() + ".TabularSection." + tabular.name());
       sections.add(ObjectTabularSection.builder()
@@ -574,7 +599,11 @@ public final class ConfdbSolutionProvider {
   private static List<EnumValue> buildEnumValues(List<EnumValueRow> valueRows, String ownerName,
                                                  MdoReference ownerReference) {
     var values = new ArrayList<EnumValue>();
+    var seen = new HashSet<String>();
     for (var row : valueRows) {
+      if (!seen.add(row.name().toLowerCase(Locale.ROOT))) {
+        continue;
+      }
       values.add(EnumValue.builder()
         .name(row.name())
         .mdoReference(MdoReference.create(MDOType.ENUM,
