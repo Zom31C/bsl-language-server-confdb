@@ -89,10 +89,19 @@ public class McpDocumentReader {
   }
 
   private <T> T access(String path, Function<DocumentContext, T> action, boolean requireFreshAst) {
-    var uri = Absolute.uri(new File(path));
+    var file = new File(path);
+    var uri = Absolute.uri(file);
     var serverContext = serverContextProvider.getServerContext(uri)
       .orElseThrow(() -> new IllegalArgumentException(
         "File is not part of any registered workspace: " + path));
+    if (!file.isFile()) {
+      throw new IllegalArgumentException(
+        "File not found in the configuration dump: " + path
+          + ". Use a path relative to the dump root, e.g. "
+          + "Catalog/Товары/Товары.obj.bsl (object module) or "
+          + "CommonModule/Имя/CommonModule.obj.bsl (common module); "
+          + "take exact paths from the confdb knowledge base.");
+    }
 
     var lock = serverContext.getDocumentLock(uri);
     var existing = serverContext.getDocument(uri);
