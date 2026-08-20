@@ -1,3 +1,55 @@
+# BSL Language Server (форк с интеграцией confdb)
+
+Форк проекта [1c-syntax/bsl-language-server](https://github.com/1c-syntax/bsl-language-server).
+Все возможности оригинала сохранены; доработки форка — в ветке
+**`confdb-metadata-source`**.
+
+## Особенности форка
+
+Интеграция с **confdb** — экстрактором конфигураций 1С:Предприятие 8 в SQLite
+(без платформы 1С и EDT, проект
+[Zom31C/1confdb-knw-lsp](https://github.com/Zom31C/1confdb-knw-lsp)):
+
+- **Метаданные конфигурации из базы confdb.** Если в `.bsl-language-server.json`
+  задан `confdbDatabase` (путь к `.db`), сервер строит модель конфигурации
+  (`Solution` mdclasses) из SQLite-базы confdb вместо EDT-файлов: объекты
+  20 типов, формы, команды, роли, подсистемы с составом, реквизиты с типами,
+  табличные части, значения перечислений. Работают типизация, переходы,
+  ссылки, метаданно-зависимые диагностики — без EDT и платформы;
+- **Диагностика `ConfdbQueryValidation`** — подсветка ошибок запросов во
+  встроенном языке: confdb проверяет тексты запросов в модулях по полному
+  синтаксису языка запросов 1С и метаданным (`confdb check-queries`) и
+  сохраняет нарушения в таблицу `query_violation`; диагностика читает её и
+  подсвечивает литералы запросов;
+- **Компактный режим `outline: true`** у инструмента MCP `document_symbols` —
+  текстовое оглавление модуля (области и сигнатуры с диапазонами строк)
+  вместо полного JSON-дерева;
+- **Устойчивость MCP-инструментов**: пустой результат вместо ошибок на
+  неразрешимых позициях (`find_references`/`call_hierarchy` на встроенных
+  методах), понятные сообщения при отсутствии файла в дампе.
+
+## Использование
+
+Самостоятельная сборка и запуск MCP-режима:
+
+```sh
+gradlew bootJar
+java -jar build/libs/bsl-language-server-<версия>-exec.jar mcp
+```
+
+Для подключения метаданных confdb положите в корень workspace
+`.bsl-language-server.json`:
+
+```json
+{ "confdbDatabase": "/path/to/out.db" }
+```
+
+В составе готового решения (экстракция `.cf` → подготовка дампа → единый
+MCP-сервер с инструментами confdb и `bsl_*`) — см. дистрибутив
+[Zom31C/1confdb-knw-lsp](https://github.com/Zom31C/1confdb-knw-lsp).
+
+---
+
 # BSL Language Server
 
 [![Actions Status](https://github.com/1c-syntax/bsl-language-server/workflows/Java%20CI/badge.svg)](https://github.com/1c-syntax/bsl-language-server/actions)
