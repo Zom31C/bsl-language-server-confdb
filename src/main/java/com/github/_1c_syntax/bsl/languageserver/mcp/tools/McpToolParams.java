@@ -26,7 +26,12 @@ package com.github._1c_syntax.bsl.languageserver.mcp.tools;
  */
 final class McpToolParams {
 
-  static final String FILE = "Path to the .bsl/.os file (absolute or relative to the working directory).";
+  static final String FILE = "Path to the .bsl/.os file (absolute or relative to the working "
+    + "directory). This must be a real file path inside the configuration dump, e.g. "
+    + "`Catalog/Товары/Товары.obj.bsl` or `CommonModule/Ценообразование/CommonModule.obj.bsl` "
+    + "(object module = `<Имя>.obj.bsl`, manager module = `<Имя>.mgr.bsl`). Do NOT pass metadata "
+    + "dot-paths like `Справочник.Товары` — they are not files; take the dump path from the "
+    + "confdb knowledge base first.";
   static final String FILE_TYPE = "File language: `BSL` for 1C:Enterprise BSL or `OS` for OneScript.";
   static final String LINE = "Zero-based line number of the symbol.";
   static final String CHARACTER = "Zero-based character offset within the line.";
